@@ -64,7 +64,7 @@ class VideoEditor:
             .input(input_path, ss=start_time, t=duration)
             .output(output_path, vcodec='libx264', acodec='aac')
             .overwrite_output()
-            .run(quiet=True, capture_output=True)
+            .run(quiet=True)
         )
     
     def _clear_cache(self):
@@ -475,7 +475,7 @@ class VideoEditor:
                               'maxrate': '8M',     # Максимальный битрейт
                               'bufsize': '12M'})   # Размер буфера
                     .overwrite_output()
-                    .run(quiet=True, capture_output=True)
+                    .run(quiet=True)
                 )
                 pass  # Успешно создан с GPU
             except Exception as nvenc_error:
@@ -494,7 +494,7 @@ class VideoEditor:
                               'profile:v': 'main',
                               'level': '4.0'})
                     .overwrite_output()
-                    .run(quiet=True, capture_output=True)
+                    .run(quiet=True)
                 )
         else:
             # CPU вывод с улучшенным качеством для больших видео
@@ -514,7 +514,7 @@ class VideoEditor:
                               'profile:v': 'main', # Основной профиль (более совместимый)
                               'level': '4.0'})     # Правильный уровень для Full HD
                     .overwrite_output()
-                    .run(quiet=True, capture_output=True)
+                    .run(quiet=True)
                 )
                 pass  # Успешно создан с CPU
             else:
@@ -533,7 +533,7 @@ class VideoEditor:
                               'profile:v': 'main', # Основной профиль (более совместимый)
                               'level': '4.0'})     # Правильный уровень для Full HD
                     .overwrite_output()
-                    .run(quiet=True, capture_output=True)
+                    .run(quiet=True)
                 )
     
     def _add_animated_subtitles(self, video, subtitles: list, start_time: float, duration: float):
