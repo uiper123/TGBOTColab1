@@ -640,52 +640,54 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Ошибка создания чанка {task['index']}: {e}")
             return False
-    
-    async def _process_chunk_parallel(self, chunk_path: str, duration: int, config: dict, 
-                                     chunk_index: int, total_chunks: int, original_video_path: str) -> list:
-        """Параллельная обработка одного чанка - генерация субтитров + создание клипов"""
+
+    async def process_chunk_logic(self, chunk_path: str, duration: int, config: dict, start_index: int) -> list:
+        """Основная логика обработки одного чанка: генерация субтитров и создание клипов."""
         try:
-            logger.info(f"🎬 ПАРАЛЛЕЛЬНО обрабатываем чанк {chunk_index+1}/{total_chunks}: {chunk_path}")
-            
-            # Получаем информацию о чанке
-            chunk_info = self.video_editor.get_video_info(chunk_path)
-            chunk_duration = chunk_info['duration']
-            expected_clips = int(chunk_duration // duration)
-            
-            logger.info(f"   📏 Длительность: {chunk_duration:.1f}сек, ожидается {expected_clips} клипов")
-            
             # 1. Генерируем субтитры для чанка
-            logger.info(f"   🎤 Генерируем субтитры...")
+            logger.info(f"   🎤 Генерируем субтитры для {chunk_path}...")
             subtitles = await self.subtitle_generator.generate(chunk_path)
-            logger.info(f"   ✅ Субтитры готовы: {len(subtitles)} фраз")
-            
-            # 2. Нарезаем чанк на клипы с учетом индекса
-            logger.info(f"   ✂️  Нарезаем на клипы...")
-            
-            # Вычисляем стартовый индекс для этого чанка
-            start_index = chunk_index * int(300 // duration)  # 300 сек на чанк
-            
+            logger.info(f"   ✅ Субтитры для {chunk_path} готовы: {len(subtitles)} фраз")
+
+            # 2. Нарезаем чанк на клипы
+            logger.info(f"   ✂️  Нарезаем на клипы из {chunk_path}...")
             clips = await self.video_editor.create_clips_parallel(
-                chunk_path, 
-                duration, 
+                chunk_path,
+                duration,
                 subtitles,
                 start_index=start_index,
                 config=config,
-                max_parallel=10  # Ограничиваем для стабильности
+                max_parallel=10
             )
-            
-            logger.info(f"   🎉 Чанк {chunk_index+1} обработан: {len(clips)} клипов создано")
-            
-            # 3. Удаляем временный чанк (если это не оригинальный файл)
+            logger.info(f"   🎉 Из {chunk_path} создано {len(clips)} клипов")
+            return clips
+        except Exception as e:
+            logger.error(f"❌ Ошибка в process_chunk_logic для {chunk_path}: {e}")
+            return []
+
+    async def _process_chunk_parallel(self, chunk_path: str, duration: int, config: dict,
+                                     chunk_index: int, total_chunks: int, original_video_path: str) -> list:
+        """Параллельная обработка одного чанка с использованием новой логики."""
+        try:
+            logger.info(f"🎬 ПАРАЛЛЕЛЬНО обрабатываем чанк {chunk_index+1}/{total_chunks}: {chunk_path}")
+
+            # Вычисляем стартовый индекс для этого чанка
+            start_index = chunk_index * int(300 // duration)
+
+            # Вызываем основную логику обработки
+            clips = await self.process_chunk_logic(chunk_path, duration, config, start_index)
+
+            # Удаляем временный чанк (если это не оригинальный файл)
             if chunk_path != original_video_path and os.path.exists(chunk_path):
                 os.remove(chunk_path)
                 logger.info(f"   🗑️  Удален временный чанк: {chunk_path}")
-            
+
             return clips
-            
+
         except Exception as e:
             logger.error(f"❌ ОШИБКА параллельной обработки чанка {chunk_index+1}: {e}")
             return []
+
     
     def _create_chunk_sync_fast(self, input_path: str, output_path: str, start_time: float, duration: float):
         """Синхронное быстрое создание чанка с максимальной оптимизацией"""
