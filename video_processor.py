@@ -678,7 +678,7 @@ class VideoProcessor:
                 subtitles,
                 start_index=start_index,
                 config=config,
-                max_parallel=3  # Ограничиваем для стабильности
+                max_parallel=10  # Ограничиваем для стабильности
             )
             
             logger.info(f"   🎉 Чанк {chunk_index+1} обработан: {len(clips)} клипов создано")
