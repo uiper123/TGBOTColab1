@@ -67,9 +67,24 @@ class VideoEditor:
             .run(quiet=True)
         )
     
+    def _clear_cache(self):
+        """Очистка кеша для нового файла"""
+        if hasattr(self, '_cached_video_info'):
+            delattr(self, '_cached_video_info')
+        if hasattr(self, '_cached_video_path'):
+            delattr(self, '_cached_video_path')
+        if hasattr(self, '_cached_scaling_info'):
+            delattr(self, '_cached_scaling_info')
+
     async def create_clips_parallel(self, video_path: str, clip_duration: int, subtitles: list, start_index: int = 0, config: dict = None, max_parallel: int = 4) -> list:
         """ПАРАЛЛЕЛЬНОЕ создание клипов с максимальным использованием GPU"""
         try:
+            # Очищаем кеш для нового файла
+            self._clear_cache()
+            
+            # Логируем начало обработки конкретного файла
+            logger.info(f"🎬 НАЧИНАЕМ обработку файла: {video_path}")
+            
             video_info = self.get_video_info(video_path)
             total_duration = video_info['duration']
             
@@ -102,7 +117,7 @@ class VideoEditor:
                 current_time += clip_duration
                 clip_index += 1
             
-            logger.info(f"🚀 ПАРАЛЛЕЛЬНАЯ ОБРАБОТКА: {len(clip_tasks)} клипов, макс. параллельно: {max_parallel}")
+            logger.info(f"🚀 ПАРАЛЛЕЛЬНАЯ ОБРАБОТКА файла {video_path}: {len(clip_tasks)} клипов, макс. параллельно: {max_parallel}")
             
             # Обрабатываем клипы пакетами для максимального использования GPU
             clips = []
@@ -110,6 +125,7 @@ class VideoEditor:
             
             async def process_clip_task(task):
                 async with semaphore:
+                    logger.info(f"📝 Обрабатываем клип {task['clip_number']} из {video_path} ({task['start_time']:.1f}-{task['start_time'] + task['duration']:.1f}с)")
                     success = await self.create_styled_clip(
                         task['input_path'],
                         task['output_path'],
@@ -120,7 +136,10 @@ class VideoEditor:
                         task['config']
                     )
                     if success:
+                        logger.info(f"✅ Клип {task['clip_number']} из {video_path} готов: {task['output_path']}")
                         return task['output_path']
+                    else:
+                        logger.error(f"❌ Ошибка создания клипа {task['clip_number']} из {video_path}")
                     return None
             
             # Запускаем все задачи параллельно
@@ -131,13 +150,13 @@ class VideoEditor:
                 if isinstance(result, str):  # Успешный результат
                     clips.append(result)
                 elif isinstance(result, Exception):
-                    logger.error(f"Ошибка создания клипа: {result}")
+                    logger.error(f"Ошибка создания клипа из {video_path}: {result}")
             
-            logger.info(f"✅ ПАРАЛЛЕЛЬНО создано {len(clips)}/{len(clip_tasks)} клипов")
+            logger.info(f"✅ ЗАВЕРШЕНА обработка файла {video_path}: создано {len(clips)}/{len(clip_tasks)} клипов")
             return clips
             
         except Exception as e:
-            logger.error(f"Ошибка параллельного создания клипов: {e}")
+            logger.error(f"Ошибка параллельного создания клипов из {video_path}: {e}")
             return []
 
     async def create_clips(self, video_path: str, clip_duration: int, subtitles: list, start_index: int = 0, config: dict = None) -> list:
@@ -225,7 +244,6 @@ class VideoEditor:
         
         # Всегда используем CPU ввод для стабильности в Colab
         main_video = ffmpeg.input(input_path, ss=start_time, t=duration)
-        logger.info(f"💻 Используем CPU для создания клипа {clip_number}")
         
         # Создаем размытый фон (растягиваем на весь экран) - ВЕРТИКАЛЬНЫЙ ФОРМАТ
         blurred_bg = (
@@ -237,29 +255,39 @@ class VideoEditor:
         )
         
         # Основное видео по центру - МАКСИМАЛЬНОЕ масштабирование с обрезкой
-        # Получаем информацию об исходном видео
-        video_info = self.get_video_info(input_path)
+        # Получаем информацию об исходном видео (кешируем для избежания повторных вызовов)
+        if not hasattr(self, '_cached_video_info') or self._cached_video_path != input_path:
+            self._cached_video_info = self.get_video_info(input_path)
+            self._cached_video_path = input_path
+            
+            # Логируем информацию о видео только один раз для каждого файла
+            original_width = self._cached_video_info['width']
+            original_height = self._cached_video_info['height']
+            original_fps = self._cached_video_info['fps']
+            
+            logger.info(f"🎬 ОБРАБОТКА ВИДЕО МАКСИМАЛЬНОГО КАЧЕСТВА: {input_path}")
+            logger.info(f"   📐 Исходное разрешение: {original_width}x{original_height} ({original_height}p)")
+            logger.info(f"   🎞️  FPS: {original_fps}")
+            logger.info(f"   🎯 Целевое разрешение: 1080x1920 (вертикальный формат)")
+            
+            # Определяем тип качества исходного видео
+            quality_type = "SD"
+            if original_height >= 2160:
+                quality_type = "4K Ultra HD"
+            elif original_height >= 1440:
+                quality_type = "2K/1440p"
+            elif original_height >= 1080:
+                quality_type = "Full HD 1080p"
+            elif original_height >= 720:
+                quality_type = "HD 720p"
+            
+            logger.info(f"   🏆 Качество исходного видео: {quality_type}")
+        
+        # Используем кешированную информацию
+        video_info = self._cached_video_info
         original_width = video_info['width']
         original_height = video_info['height']
         original_fps = video_info['fps']
-        
-        logger.info(f"🎬 ОБРАБОТКА ВИДЕО МАКСИМАЛЬНОГО КАЧЕСТВА:")
-        logger.info(f"   📐 Исходное разрешение: {original_width}x{original_height} ({original_height}p)")
-        logger.info(f"   🎞️  FPS: {original_fps}")
-        logger.info(f"   🎯 Целевое разрешение: 1080x1920 (вертикальный формат)")
-        
-        # Определяем тип качества исходного видео
-        quality_type = "SD"
-        if original_height >= 2160:
-            quality_type = "4K Ultra HD"
-        elif original_height >= 1440:
-            quality_type = "2K/1440p"
-        elif original_height >= 1080:
-            quality_type = "Full HD 1080p"
-        elif original_height >= 720:
-            quality_type = "HD 720p"
-        
-        logger.info(f"   🏆 Качество исходного видео: {quality_type}")
         
         # Целевые размеры для вертикального формата (9:16)
         target_screen_width = 1080
@@ -278,34 +306,58 @@ class VideoEditor:
         # Это сделает его очень крупным, с обрезкой по бокам если нужно
         center_video_height = int(target_screen_height * 0.8)  # 80% высоты экрана (1536px)
         
-        if original_aspect > target_aspect:
-            # Широкое видео - масштабируем по ВЫСОТЕ для максимального размера
-            target_height = center_video_height
-            target_width = int(target_height * original_aspect)
-            
-            # Если ширина больше экрана - пусть обрезается, как вы просили
-            crop_needed = target_width > target_screen_width
-            if crop_needed:
-                crop_width = target_screen_width
-                crop_height = target_height
-                logger.info(f"Широкое видео: {target_width}x{target_height} -> обрезка до {crop_width}x{crop_height}")
-            else:
-                logger.info(f"Широкое видео: {target_width}x{target_height} (помещается)")
+        # Вычисляем параметры масштабирования (логируем только один раз для файла)
+        if not hasattr(self, '_cached_scaling_info') or self._cached_video_path != input_path:
+            if original_aspect > target_aspect:
+                # Широкое видео - масштабируем по ВЫСОТЕ для максимального размера
+                target_height = center_video_height
+                target_width = int(target_height * original_aspect)
                 
-        else:
-            # Высокое или квадратное видео - тоже масштабируем по высоте
-            target_height = center_video_height
-            target_width = int(target_height * original_aspect)
-            crop_needed = False
-            logger.info(f"Высокое видео: {target_width}x{target_height}")
+                # Если ширина больше экрана - пусть обрезается, как вы просили
+                crop_needed = target_width > target_screen_width
+                if crop_needed:
+                    crop_width = target_screen_width
+                    crop_height = target_height
+                    logger.info(f"Широкое видео: {target_width}x{target_height} -> обрезка до {crop_width}x{crop_height}")
+                else:
+                    logger.info(f"Широкое видео: {target_width}x{target_height} (помещается)")
+                    
+            else:
+                # Высокое или квадратное видео - тоже масштабируем по высоте
+                target_height = center_video_height
+                target_width = int(target_height * original_aspect)
+                crop_needed = False
+                logger.info(f"Высокое видео: {target_width}x{target_height}")
+            
+            # Убеждаемся, что размеры четные
+            target_width = target_width - (target_width % 2)
+            target_height = target_height - (target_height % 2)
+            
+            logger.info(f"Исходное видео: {original_width}x{original_height} (соотношение: {original_aspect:.2f})")
+            logger.info(f"Целевой экран: {target_screen_width}x{target_screen_height}")
+            logger.info(f"КРУПНОЕ видео: {target_width}x{target_height} (займет 80% высоты экрана)")
+            
+            # Кешируем параметры масштабирования
+            self._cached_scaling_info = {
+                'target_width': target_width,
+                'target_height': target_height,
+                'crop_needed': crop_needed,
+                'crop_width': crop_width if crop_needed else target_width,
+                'crop_height': crop_height if crop_needed else target_height,
+                'is_large_video': is_large_video
+            }
+            
+            if is_large_video:
+                logger.info(f"Используется Lanczos масштабирование для большого видео")
         
-        # Убеждаемся, что размеры четные
-        target_width = target_width - (target_width % 2)
-        target_height = target_height - (target_height % 2)
-        
-        logger.info(f"Исходное видео: {original_width}x{original_height} (соотношение: {original_aspect:.2f})")
-        logger.info(f"Целевой экран: {target_screen_width}x{target_screen_height}")
-        logger.info(f"КРУПНОЕ видео: {target_width}x{target_height} (займет 80% высоты экрана)")
+        # Используем кешированные параметры масштабирования
+        scaling_info = self._cached_scaling_info
+        target_width = scaling_info['target_width']
+        target_height = scaling_info['target_height']
+        crop_needed = scaling_info['crop_needed']
+        crop_width = scaling_info['crop_width']
+        crop_height = scaling_info['crop_height']
+        is_large_video = scaling_info['is_large_video']
         
         # Используем улучшенное масштабирование для больших видео
         if is_large_video:
@@ -316,7 +368,6 @@ class VideoEditor:
                 .filter('scale', target_width, target_height, 
                        flags='lanczos')  # Высококачественный алгоритм
             )
-            logger.info(f"Используется Lanczos масштабирование для большого видео")
         else:
             # Для обычных видео используем стандартное масштабирование
             main_scaled = (
@@ -402,24 +453,45 @@ class VideoEditor:
         # Финальный вывод с GPU/CPU кодировщиком
         if gpu_available:
             # GPU ускоренный вывод (NVIDIA NVENC) - ИСПРАВЛЕННАЯ ВЕРСИЯ
-            (
-                ffmpeg
-                .output(final_video_scaled, audio, output_path, 
-                       vcodec='h264_nvenc',    # GPU кодировщик NVIDIA
-                       acodec='aac',
-                       preset='fast',          # Быстрый пресет для стабильности
-                       cq=23,                  # Разумное качество (23 хорошо для GPU)
-                       pix_fmt='yuv420p',      # Совместимость
-                       **{'b:v': '8M',         # Разумный битрейт
-                          'b:a': '128k',       # Стандартный битрейт аудио
-                          'maxrate': '10M',    # Максимальный битрейт
-                          'bufsize': '16M',    # Размер буфера
-                          'profile:v': 'main', # Основной профиль (более совместимый)
-                          'level': '4.0'})     # Правильный уровень для Full HD
-                .overwrite_output()
-                .run()
-            )
-            logger.info(f"🎮 Клип {clip_number} создан с GPU ускорением МАКСИМАЛЬНОГО КАЧЕСТВА (1080x1920)")
+            try:
+                (
+                    ffmpeg
+                    .output(final_video_scaled, audio, output_path, 
+                           vcodec='h264_nvenc',    # GPU кодировщик NVIDIA
+                           acodec='aac',
+                           preset='p4',            # NVENC пресет (p1-p7, p4 = medium)
+                           rc='vbr',               # Variable bitrate для NVENC
+                           cq=23,                  # Качество для NVENC
+                           pix_fmt='yuv420p',      # Совместимость
+                           **{'b:v': '6M',         # Консервативный битрейт
+                              'b:a': '128k',       # Стандартный битрейт аудио
+                              'maxrate': '8M',     # Максимальный битрейт
+                              'bufsize': '12M'})   # Размер буфера
+                    .overwrite_output()
+                    .run()
+                )
+                logger.info(f"🎮 Клип {clip_number} создан с GPU ускорением МАКСИМАЛЬНОГО КАЧЕСТВА (1080x1920)")
+            except Exception as nvenc_error:
+                logger.warning(f"NVENC ошибка для клипа {clip_number}: {nvenc_error}")
+                logger.info(f"Переключаемся на CPU для клипа {clip_number}")
+                # Fallback на CPU
+                (
+                    ffmpeg
+                    .output(final_video_scaled, audio, output_path, 
+                           vcodec='libx264',
+                           acodec='aac',
+                           preset='fast',
+                           crf=23,
+                           pix_fmt='yuv420p',
+                           **{'b:a': '128k',
+                              'maxrate': '8M',
+                              'bufsize': '12M',
+                              'profile:v': 'main',
+                              'level': '4.0'})
+                    .overwrite_output()
+                    .run()
+                )
+                logger.info(f"💻 Клип {clip_number} создан с CPU (fallback после NVENC ошибки)")
         else:
             # CPU вывод с улучшенным качеством для больших видео
             if is_large_video:
