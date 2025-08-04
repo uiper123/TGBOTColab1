@@ -648,51 +648,117 @@ class VideoProcessor:
             logger.error(f"Ошибка создания чанка {task['index']}: {e}")
             return False
     
-    async def _process_chunk_parallel(self, chunk_path: str, duration: int, config: dict, 
+    async def _process_chunk_parallel(self, chunk_path: str, duration: int, config: dict,
                                      chunk_index: int, total_chunks: int, original_video_path: str) -> list:
-        """Параллельная обработка одного чанка - генерация субтитров + создание клипов"""
+        """Параллельная обработка одного чанка - генерация субтитров + ПАРАЛЛЕЛЬНОЕ создание клипов"""
         try:
             logger.info(f"🎬 ПАРАЛЛЕЛЬНО обрабатываем чанк {chunk_index+1}/{total_chunks}: {chunk_path}")
-            
-            # Получаем информацию о чанке
+
+            # 1. Генерируем субтитры для ВСЕГО чанка ОДИН РАЗ
+            logger.info(f"   🎤 Генерируем субтитры для чанка...")
+            subtitles = await self.subtitle_generator.generate(chunk_path)
+            logger.info(f"   ✅ Субтитры для чанка готовы: {len(subtitles)} фраз")
+
+            # 2. Планируем нарезку на КУСОЧКИ (клипы)
             chunk_info = self.video_editor.get_video_info(chunk_path)
             chunk_duration = chunk_info['duration']
-            expected_clips = int(chunk_duration // duration)
             
-            logger.info(f"   📏 Длительность: {chunk_duration:.1f}сек, ожидается {expected_clips} клипов")
-            
-            # 1. Генерируем субтитры для чанка
-            logger.info(f"   🎤 Генерируем субтитры...")
-            subtitles = await self.subtitle_generator.generate(chunk_path)
-            logger.info(f"   ✅ Субтитры готовы: {len(subtitles)} фраз")
-            
-            # 2. Нарезаем чанк на клипы с учетом индекса
-            logger.info(f"   ✂️  Нарезаем на клипы...")
+            piece_tasks = []
+            current_time = 0
             
             # Вычисляем стартовый индекс для этого чанка
-            start_index = chunk_index * int(300 // duration)  # 300 сек на чанк
-            
-            clips = await self.video_editor.create_clips_parallel(
-                chunk_path, 
-                duration, 
-                subtitles,
-                start_index=start_index,
-                config=config,
-                max_parallel=3  # Ограничиваем для стабильности
+            start_clip_index = chunk_index * int(300 // duration) # 300 сек - стандартная длина чанка
+            clip_index = start_clip_index
+
+            while current_time + duration <= chunk_duration:
+                piece_tasks.append(self._process_piece_parallel(
+                    chunk_path=chunk_path,
+                    start_time=current_time,
+                    duration=duration,
+                    subtitles=subtitles,
+                    config=config,
+                    clip_number=clip_index + 1
+                ))
+                current_time += duration
+                clip_index += 1
+                
+            logger.info(f"   ✂️  Запланировано {len(piece_tasks)} клипов для параллельной обработки.")
+
+            # 3. Запускаем ВСЕ кусочки этого чанка ПАРАЛЛЕЛЬНО
+            # Ограничиваем количество одновременных задач ffmpeg для стабильности
+            max_concurrent_ffmpeg = 3 
+            semaphore = asyncio.Semaphore(max_concurrent_ffmpeg)
+
+            async def run_with_semaphore(task):
+                async with semaphore:
+                    return await task
+
+            # Запускаем обработку всех кусочков
+            results = await asyncio.gather(
+                *[run_with_semaphore(task) for task in piece_tasks], 
+                return_exceptions=True
             )
-            
-            logger.info(f"   🎉 Чанк {chunk_index+1} обработан: {len(clips)} клипов создано")
-            
-            # 3. Удаляем временный чанк (если это не оригинальный файл)
+
+            # 4. Собираем результаты
+            created_clips = []
+            for i, result in enumerate(results):
+                if isinstance(result, str):
+                    created_clips.append(result)
+                    logger.info(f"   ✅ Клип {start_clip_index + i + 1} успешно создан: {result}")
+                elif isinstance(result, Exception):
+                    logger.error(f"   ❌ Ошибка создания клипа {start_clip_index + i + 1}: {result}")
+                else:
+                    logger.warning(f"   ⚠️ Не удалось создать клип {start_clip_index + i + 1}")
+
+            logger.info(f"   🎉 Чанк {chunk_index+1} обработан: {len(created_clips)}/{len(piece_tasks)} клипов создано")
+
+            # 5. Удаляем временный чанк
             if chunk_path != original_video_path and os.path.exists(chunk_path):
-                os.remove(chunk_path)
-                logger.info(f"   🗑️  Удален временный чанк: {chunk_path}")
-            
-            return clips
-            
+                try:
+                    os.remove(chunk_path)
+                    logger.info(f"   🗑️  Удален временный чанк: {chunk_path}")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Не удалось удалить временный чанк {chunk_path}: {e}")
+
+            return created_clips
+
         except Exception as e:
-            logger.error(f"❌ ОШИБКА параллельной обработки чанка {chunk_index+1}: {e}")
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА обработки чанка {chunk_index+1}: {e}")
+            # В случае ошибки возвращаем пустой список, чтобы не прерывать всю обработку
             return []
+
+    async def _process_piece_parallel(self, chunk_path: str, start_time: float, duration: int, 
+                                        subtitles: list, config: dict, clip_number: int) -> str | None:
+        """
+        Параллельная обработка ОДНОГО КУСОЧКА (клипа) из чанка.
+        Создает один стилизованный клип.
+        """
+        try:
+            logger.info(f"   🚀 Обрабатываем кусочек для клипа #{clip_number} ({start_time:.1f}s - {start_time+duration:.1f}s)")
+            
+            clip_path = self.video_editor.output_dir / f"clip_{clip_number:03d}.mp4"
+
+            # Используем существующий метод для создания стилизованного клипа
+            success = await self.video_editor.create_styled_clip(
+                input_path=chunk_path,
+                output_path=str(clip_path),
+                start_time=start_time,
+                duration=duration,
+                subtitles=subtitles,
+                clip_number=clip_number,
+                config=config
+            )
+
+            if success:
+                return str(clip_path)
+            else:
+                logger.warning(f"   ⚠️ Не удалось создать клип #{clip_number}")
+                return None
+                
+        except Exception as e:
+            # Логируем ошибку и возвращаем None, чтобы не прерывать gather
+            logger.error(f"   ❌ Ошибка в _process_piece_parallel для клипа #{clip_number}: {e}")
+            return None
     
     def _create_chunk_sync_fast(self, input_path: str, output_path: str, start_time: float, duration: float):
         """Синхронное быстрое создание чанка с максимальной оптимизацией"""
