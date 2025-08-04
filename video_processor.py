@@ -83,50 +83,43 @@ class VideoProcessor:
             logger.info(f"📊 ИТОГО готовых чанков: {len(existing_chunks)}/{len(chunks)}")
             chunks = existing_chunks
             
-            # 3. ПАРАЛЛЕЛЬНАЯ обработка всех чанков одновременно
-            logger.info(f"🚀 НАЧИНАЕМ ПАРАЛЛЕЛЬНУЮ обработку {len(chunks)} чанков!")
+            # 3. Последовательная обработка чанков (параллельная обработка клипов внутри)
+            logger.info(f"🚀 НАЧИНАЕМ ПОСЛЕДОВАТЕЛЬНУЮ обработку {len(chunks)} чанков!")
             
-            # Создаем задачи для параллельной обработки всех чанков
-            chunk_tasks = []
+            all_clips = []
             total_expected_clips = 0
             
             for i, chunk_path in enumerate(chunks):
-                # Получаем информацию о чанке для расчета ожидаемых клипов
                 try:
+                    # Получаем информацию о чанке для расчета ожидаемых клипов
                     chunk_info = self.video_editor.get_video_info(chunk_path)
                     chunk_duration = chunk_info['duration']
                     expected_clips_in_chunk = int(chunk_duration // duration)
                     total_expected_clips += expected_clips_in_chunk
                     
-                    logger.info(f"📋 Чанк {i+1}: {chunk_duration:.1f}сек, ожидается {expected_clips_in_chunk} клипов")
+                    logger.info(f"📋 Обработка чанка {i+1}/{len(chunks)}: {chunk_duration:.1f}сек, ожидается {expected_clips_in_chunk} клипов")
                     
-                    # Создаем задачу для обработки этого чанка
-                    chunk_tasks.append(self._process_chunk_parallel(
+                    # Обрабатываем чанк и ждем результат (внутри этого метода клипы создаются параллельно)
+                    clips_from_chunk = await self._process_chunk_parallel(
                         chunk_path, 
                         duration, 
                         config, 
                         i, 
                         len(chunks),
                         video_path
-                    ))
+                    )
+                    
+                    if isinstance(clips_from_chunk, Exception):
+                        logger.error(f"❌ Ошибка обработки чанка {i+1}: {clips_from_chunk}")
+                    elif clips_from_chunk and isinstance(clips_from_chunk, list):
+                        all_clips.extend(clips_from_chunk)
+                        logger.info(f"✅ Чанк {i+1} обработан: {len(clips_from_chunk)} клипов")
+                    else:
+                        logger.warning(f"⚠️ Чанк {i+1} вернул пустой или некорректный результат")
+
                 except Exception as e:
-                    logger.error(f"❌ Ошибка подготовки чанка {i+1}: {e}")
+                    logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА обработки чанка {i+1}: {e}")
                     continue
-            
-            # Запускаем ВСЕ чанки параллельно
-            logger.info(f"⚡ Запускаем параллельную обработку {len(chunk_tasks)} чанков...")
-            chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
-            
-            # Собираем результаты
-            all_clips = []
-            for i, result in enumerate(chunk_results):
-                if isinstance(result, Exception):
-                    logger.error(f"❌ Ошибка обработки чанка {i+1}: {result}")
-                elif result and isinstance(result, list):
-                    all_clips.extend(result)
-                    logger.info(f"✅ Чанк {i+1} обработан: {len(result)} клипов")
-                else:
-                    logger.warning(f"⚠️ Чанк {i+1} вернул пустой результат")
             
             # ФИНАЛЬНАЯ СТАТИСТИКА
             logger.info(f"🏁 ФИНАЛЬНАЯ СТАТИСТИКА ОБРАБОТКИ:")
