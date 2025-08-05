@@ -160,6 +160,9 @@ class VideoEditor:
     async def _create_single_clip(self, task: dict) -> str:
         """Создание одного клипа с обработкой ошибок"""
         try:
+            import time
+            start_time = time.time()
+            
             logger.info(f"📝 Создаем клип {task['clip_number']} ({task['start_time']:.1f}-{task['start_time'] + task['duration']:.1f}с)")
             
             success = await self.create_styled_clip(
@@ -172,10 +175,14 @@ class VideoEditor:
                 task['config']
             )
             
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
             if success and os.path.exists(task['output_path']):
+                logger.info(f"⏱️ Клип {task['clip_number']} создан за {processing_time:.1f} сек")
                 return task['output_path']
             else:
-                logger.error(f"❌ Клип {task['clip_number']} не создан или файл не существует")
+                logger.error(f"❌ Клип {task['clip_number']} не создан или файл не существует (время: {processing_time:.1f} сек)")
                 return None
                 
         except Exception as e:
@@ -264,6 +271,10 @@ class VideoEditor:
         
         # Проверяем доступность GPU
         gpu_available = self._check_gpu_support()
+        if gpu_available:
+            logger.info(f"🎮 Клип {clip_number}: используется GPU ускорение")
+        else:
+            logger.info(f"💻 Клип {clip_number}: используется CPU обработка")
         
         # Всегда используем CPU ввод для стабильности в Colab
         main_video = ffmpeg.input(input_path, ss=start_time, t=duration)
@@ -584,6 +595,21 @@ class VideoEditor:
         try:
             import subprocess
             
+            # Сначала проверяем наличие NVIDIA GPU
+            try:
+                nvidia_result = subprocess.run(
+                    ['nvidia-smi'], 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=5
+                )
+                if nvidia_result.returncode != 0:
+                    logger.warning("⚠️ NVIDIA GPU не обнаружен (nvidia-smi недоступен)")
+                    return False
+            except:
+                logger.warning("⚠️ NVIDIA GPU не обнаружен (nvidia-smi не найден)")
+                return False
+            
             # Проверяем доступность NVENC (NVIDIA GPU кодировщик)
             result = subprocess.run(
                 ['ffmpeg', '-hide_banner', '-encoders'], 
@@ -593,9 +619,12 @@ class VideoEditor:
             )
             
             if 'h264_nvenc' in result.stdout:
+                logger.info("✅ NVENC кодировщик доступен в FFmpeg")
                 return True
             else:
+                logger.warning("⚠️ NVENC кодировщик недоступен в FFmpeg")
                 return False
                 
         except Exception as e:
+            logger.error(f"❌ Ошибка проверки GPU: {e}")
             return False
