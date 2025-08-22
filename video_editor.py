@@ -276,15 +276,25 @@ class VideoEditor:
         else:
             logger.info(f"💻 Клип {clip_number}: используется CPU обработка")
         
-        # Всегда используем CPU ввод для стабильности в Colab
-        main_video = ffmpeg.input(input_path, ss=start_time, t=duration)
+        # Оптимизированный ввод с GPU-ускорением
+        input_options = {'ss': start_time, 't': duration}
+        if gpu_available:
+            # Используем аппаратный декодер NVIDIA
+            input_options['hwaccel'] = 'cuda'
+            input_options['c:v'] = 'h264_cuvid' # или hevc_cuvid для H.265
+
+        main_video = ffmpeg.input(input_path, **input_options)
         
+        # Загружаем видео в память GPU
+        video_stream = main_video.video
+        if gpu_available:
+            video_stream = video_stream.filter('hwupload_cuda')
+
         # Создаем размытый фон (растягиваем на весь экран) - ВЕРТИКАЛЬНЫЙ ФОРМАТ
         blurred_bg = (
-            main_video
-            .video
-            .filter('scale', 1080, 1920, force_original_aspect_ratio='increase')  # Принудительно вертикальный
-            .filter('crop', 1080, 1920)  # Обрезаем до точного размера
+            video_stream
+            .filter('scale_npp', 1080, 1920) # Используем GPU-фильтр
+            .filter('crop', 1080, 1920)
             .filter('gblur', sigma=20)
         )
         
@@ -378,31 +388,25 @@ class VideoEditor:
         is_large_video = scaling_info['is_large_video']
         
         # Используем улучшенное масштабирование для больших видео
-        if is_large_video:
-            # Для больших видео используем высококачественный алгоритм масштабирования
-            main_scaled = (
-                main_video
-                .video
-                .filter('scale', target_width, target_height, 
-                       flags='lanczos')  # Высококачественный алгоритм
-            )
-        else:
-            # Для обычных видео используем стандартное масштабирование
-            main_scaled = (
-                main_video
-                .video
-                .filter('scale', target_width, target_height)
-            )
+        scaling_algorithm = 'lanczos' if is_large_video else 'bicubic'
+        main_scaled = (
+            video_stream # Используем уже загруженный в GPU поток
+            .filter('scale_npp', target_width, target_height, interp_algo=scaling_algorithm)
+        )
         
         # Если нужна обрезка по бокам - применяем crop фильтр
         if crop_needed:
             main_scaled = main_scaled.filter('crop', crop_width, crop_height, 
-                                           x='(iw-ow)/2', y='(ih-oh)/2')  # Обрезаем по центру
+                                           x='(iw-ow)/2', y='(ih-oh)/2')
         
-        # Накладываем основное видео на размытый фон
-        video_with_bg = ffmpeg.filter([blurred_bg, main_scaled], 'overlay', 
+        # Накладываем основное видео на размытый фон (тоже на GPU)
+        video_with_bg = ffmpeg.filter([blurred_bg, main_scaled], 'overlay_cuda', 
                                     x='(W-w)/2', y='(H-h)/2')
         
+        # Для добавления текста необходимо вернуть видео в системную память
+        if gpu_available:
+            video_with_bg = video_with_bg.filter('hwdownload').filter('format', 'yuv420p')
+
         # Получаем пользовательские заголовки из config
         if config:
             title_template = config.get('title', 'ФРАГМЕНТ')
