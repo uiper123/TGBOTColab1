@@ -10,7 +10,7 @@ class SubtitleGenerator:
     def __init__(self):
         # Загружаем легкую модель Whisper
         self.model = None
-        self.model_name = "base"  # Можно использовать "tiny" для еще большей скорости
+        self.model_name = "tiny"  # Можно использовать "base" для большей точности
         self.whisper_available = False
         self._check_whisper()
     

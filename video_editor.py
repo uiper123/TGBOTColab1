@@ -289,10 +289,17 @@ class VideoEditor:
         video_stream = main_video.video
         if gpu_available:
             video_stream = video_stream.filter('hwupload_cuda')
+            # РЕШЕНИЕ: Разделяем поток на два, чтобы избежать ошибки "multiple outgoing edges"
+            split_streams = video_stream.filter('split')
+            video_stream_bg = split_streams[0]
+            video_stream_main = split_streams[1]
+        else:
+            video_stream_bg = video_stream
+            video_stream_main = video_stream
 
         # Создаем размытый фон (растягиваем на весь экран) - ВЕРТИКАЛЬНЫЙ ФОРМАТ
         blurred_bg = (
-            video_stream
+            video_stream_bg
             .filter('scale_npp', 1080, 1920) # Используем GPU-фильтр
             .filter('crop', 1080, 1920)
             .filter('gblur', sigma=20)
@@ -390,7 +397,7 @@ class VideoEditor:
         # Используем улучшенное масштабирование для больших видео
         scaling_algorithm = 'lanczos' if is_large_video else 'bicubic'
         main_scaled = (
-            video_stream # Используем уже загруженный в GPU поток
+            video_stream_main # Используем уже загруженный в GPU поток
             .filter('scale_npp', target_width, target_height, interp_algo=scaling_algorithm)
         )
         
