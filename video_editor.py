@@ -76,7 +76,7 @@ class VideoEditor:
         if hasattr(self, '_cached_scaling_info'):
             delattr(self, '_cached_scaling_info')
 
-    async def create_clips_parallel(self, video_path: str, clip_duration: int, subtitles: list, start_index: int = 0, config: dict = None, max_parallel: int = 4) -> list:
+    async def create_clips_parallel(self, video_path: str, clip_duration: int, subtitles: list, start_index: int = 0, config: dict = None, max_parallel: int = None) -> list:
         """ПРОСТОЕ и НАДЕЖНОЕ создание клипов с ограниченной параллельностью"""
         try:
             # Очищаем кеш для нового файла
@@ -112,6 +112,16 @@ class VideoEditor:
                 
                 current_time += clip_duration
                 clip_index += 1
+            
+            # Автоматически определяем оптимальное количество параллельных процессов
+            if max_parallel is None:
+                gpu_available = self._check_gpu_support()
+                if gpu_available:
+                    max_parallel = min(8, len(clips_to_create))  # Максимум 8 для GPU (больше VRAM)
+                    logger.info(f"🚀 GPU режим: автоматически выбрано {max_parallel} параллельных процессов")
+                else:
+                    max_parallel = min(4, len(clips_to_create))  # Максимум 4 для CPU
+                    logger.info(f"💻 CPU режим: автоматически выбрано {max_parallel} параллельных процессов")
             
             logger.info(f"🚀 Планируется создать {len(clips_to_create)} клипов, макс. параллельно: {max_parallel}")
             
@@ -267,25 +277,28 @@ class VideoEditor:
     
     def _create_styled_clip_sync(self, input_path: str, output_path: str, start_time: float,
                                duration: float, subtitles: list, clip_number: int, config: dict = None):
-        """Синхронное создание стилизованного клипа с GPU ускорением"""
+        """Синхронное создание стилизованного клипа с ПОЛНЫМ GPU ускорением"""
         
         # Проверяем доступность GPU
         gpu_available = self._check_gpu_support()
         if gpu_available:
-            logger.info(f"🎮 Клип {clip_number}: используется GPU ускорение")
+            logger.info(f"🚀 Клип {clip_number}: ПОЛНОЕ GPU ускорение (декодирование + обработка + кодирование)")
+            # ПОЛНОЕ GPU ускорение: декодирование на GPU
+            main_video = ffmpeg.input(input_path, ss=start_time, t=duration, 
+                                    hwaccel='cuda', hwaccel_output_format='cuda')
         else:
             logger.info(f"💻 Клип {clip_number}: используется CPU обработка")
-        
-        # Всегда используем CPU ввод для стабильности в Colab
-        main_video = ffmpeg.input(input_path, ss=start_time, t=duration)
+            # CPU ввод для fallback
+            main_video = ffmpeg.input(input_path, ss=start_time, t=duration)
         
         # Создаем размытый фон (растягиваем на весь экран) - ВЕРТИКАЛЬНЫЙ ФОРМАТ
+        # Используем CPU фильтры для стабильности, но с GPU декодированием
         blurred_bg = (
             main_video
             .video
-            .filter('scale', 1080, 1920, force_original_aspect_ratio='increase')  # Принудительно вертикальный
+            .filter('scale', 1080, 1920, force_original_aspect_ratio='increase')  # Масштабирование
             .filter('crop', 1080, 1920)  # Обрезаем до точного размера
-            .filter('gblur', sigma=20)
+            .filter('gblur', sigma=20)  # Размытие
         )
         
         # Основное видео по центру - МАКСИМАЛЬНОЕ масштабирование с обрезкой
@@ -468,28 +481,33 @@ class VideoEditor:
         # ПРИНУДИТЕЛЬНО добавляем финальное масштабирование до 9:16
         final_video_scaled = final_video.filter('scale', 1080, 1920, force_original_aspect_ratio='decrease').filter('pad', 1080, 1920, '(ow-iw)/2', '(oh-ih)/2')
         
-        # Финальный вывод с GPU/CPU кодировщиком
+        # Финальный вывод с МАКСИМАЛЬНЫМ GPU ускорением
         if gpu_available:
-            # GPU ускоренный вывод (NVIDIA NVENC) - ИСПРАВЛЕННАЯ ВЕРСИЯ
+            # МАКСИМАЛЬНОЕ GPU ускорение (NVIDIA NVENC) - используем больше GPU памяти
             try:
                 (
                     ffmpeg
                     .output(final_video_scaled, audio, output_path, 
                            vcodec='h264_nvenc',    # GPU кодировщик NVIDIA
                            acodec='aac',
-                           preset='p4',            # NVENC пресет (p1-p7, p4 = medium)
+                           preset='p2',            # БЫСТРЫЙ NVENC пресет (p1=fastest, p2=faster)
                            rc='vbr',               # Variable bitrate для NVENC
-                           cq=23,                  # Качество для NVENC
+                           cq=20,                  # Более высокое качество (меньше число = лучше качество)
                            pix_fmt='yuv420p',      # Совместимость
-                           **{'b:v': '6M',         # Консервативный битрейт
+                           gpu=0,                  # Принудительно используем первый GPU
+                           **{'b:v': '8M',         # Увеличенный битрейт для лучшего качества
                               'b:a': '128k',       # Стандартный битрейт аудио
-                              'maxrate': '8M',     # Максимальный битрейт
-                              'bufsize': '12M'})   # Размер буфера
+                              'maxrate': '12M',    # Увеличенный максимальный битрейт
+                              'bufsize': '16M',    # Увеличенный размер буфера (больше GPU памяти)
+                              'surfaces': '32',    # Больше поверхностей для GPU (использует больше VRAM)
+                              'delay': '0',        # Минимальная задержка
+                              'rc-lookahead': '32'}) # Увеличенный lookahead (больше GPU вычислений)
                     .overwrite_output()
                     .run(quiet=True)
                 )
-                pass  # Успешно создан с GPU
+                logger.info(f"✅ Клип {clip_number}: создан с МАКСИМАЛЬНЫМ GPU ускорением")
             except Exception as nvenc_error:
+                logger.warning(f"⚠️ Клип {clip_number}: GPU не сработал, fallback на CPU: {nvenc_error}")
                 # Fallback на CPU
                 (
                     ffmpeg
