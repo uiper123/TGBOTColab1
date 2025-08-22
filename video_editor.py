@@ -29,7 +29,14 @@ class VideoEditor:
             duration = float(probe['format']['duration'])
             width = int(video_stream['width'])
             height = int(video_stream['height'])
-            fps = eval(video_stream['r_frame_rate'])
+            
+            # Правильно парсим FPS (может быть в формате "30/1" или "29.97")
+            fps_str = video_stream['r_frame_rate']
+            if '/' in fps_str:
+                numerator, denominator = fps_str.split('/')
+                fps = float(numerator) / float(denominator)
+            else:
+                fps = float(fps_str)
             
             return {
                 'duration': duration,
@@ -67,7 +74,197 @@ class VideoEditor:
             .run(quiet=True)
         )
     
+    def _clear_cache(self):
+        """Очистка кеша для нового файла"""
+        if hasattr(self, '_cached_video_info'):
+            delattr(self, '_cached_video_info')
+        if hasattr(self, '_cached_video_path'):
+            delattr(self, '_cached_video_path')
+        if hasattr(self, '_cached_scaling_info'):
+            delattr(self, '_cached_scaling_info')
+
+    async def create_clips_parallel(self, video_path: str, clip_duration: int, subtitles: list, start_index: int = 0, config: dict = None, max_parallel: int = None) -> list:
+        """ПРОСТОЕ и НАДЕЖНОЕ создание клипов с ограниченной параллельностью"""
+        try:
+            # Очищаем кеш для нового файла
+            self._clear_cache()
+            
+            logger.info(f"🎬 НАЧИНАЕМ обработку файла: {video_path}")
+            
+            video_info = self.get_video_info(video_path)
+            total_duration = video_info['duration']
+            
+            # Планируем клипы
+            clips_to_create = []
+            current_time = 0
+            clip_index = start_index
+            
+            while current_time < total_duration:
+                remaining_time = total_duration - current_time
+                
+                if remaining_time < clip_duration:
+                    logger.info(f"Пропущен последний кусок: {remaining_time:.1f} сек < {clip_duration} сек")
+                    break
+                
+                clip_path = self.output_dir / f"clip_{clip_index:03d}.mp4"
+                clips_to_create.append({
+                    'input_path': video_path,
+                    'output_path': str(clip_path),
+                    'start_time': current_time,
+                    'duration': clip_duration,
+                    'subtitles': subtitles,
+                    'clip_number': clip_index + 1,
+                    'config': config
+                })
+                
+                current_time += clip_duration
+                clip_index += 1
+            
+            # Автоматически определяем оптимальное количество параллельных процессов
+            if max_parallel is None:
+                gpu_available = self._check_gpu_support()
+                if gpu_available:
+                    max_parallel = min(8, len(clips_to_create))  # Максимум 8 для GPU (больше VRAM)
+                    logger.info(f"🚀 GPU режим: автоматически выбрано {max_parallel} параллельных процессов")
+                else:
+                    max_parallel = min(4, len(clips_to_create))  # Максимум 4 для CPU
+                    logger.info(f"💻 CPU режим: автоматически выбрано {max_parallel} параллельных процессов")
+            
+            logger.info(f"🚀 Планируется создать {len(clips_to_create)} клипов, макс. параллельно: {max_parallel}")
+            
+            # ПРОСТАЯ ПОСЛЕДОВАТЕЛЬНАЯ ОБРАБОТКА ПАКЕТАМИ
+            created_clips = []
+            
+            # Разбиваем на пакеты по max_parallel
+            for i in range(0, len(clips_to_create), max_parallel):
+                batch = clips_to_create[i:i + max_parallel]
+                logger.info(f"📦 Обрабатываем пакет {i//max_parallel + 1}: клипы {i+1}-{min(i+max_parallel, len(clips_to_create))}")
+                
+                # Создаем задачи для текущего пакета
+                batch_tasks = []
+                for task in batch:
+                    batch_tasks.append(self._create_single_clip(task))
+                
+                # Ждем завершения всех задач в пакете
+                try:
+                    batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                    
+                    # Обрабатываем результаты
+                    for j, result in enumerate(batch_results):
+                        if isinstance(result, Exception):
+                            logger.error(f"❌ Ошибка создания клипа {batch[j]['clip_number']}: {result}")
+                        elif result:
+                            created_clips.append(result)
+                            logger.info(f"✅ Клип {batch[j]['clip_number']} готов: {result}")
+                        else:
+                            logger.warning(f"⚠️ Клип {batch[j]['clip_number']} не создан")
+                            
+                except Exception as e:
+                    logger.error(f"❌ Ошибка обработки пакета: {e}")
+                    continue
+                
+                # Небольшая пауза между пакетами для стабильности
+                if i + max_parallel < len(clips_to_create):
+                    await asyncio.sleep(1)
+            
+            logger.info(f"✅ ЗАВЕРШЕНА обработка файла {video_path}: создано {len(created_clips)}/{len(clips_to_create)} клипов")
+            return created_clips
+            
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка создания клипов из {video_path}: {e}")
+            return []
     
+    async def _create_single_clip(self, task: dict) -> str:
+        """Создание одного клипа с обработкой ошибок"""
+        try:
+            import time
+            start_time = time.time()
+            
+            logger.info(f"📝 Создаем клип {task['clip_number']} ({task['start_time']:.1f}-{task['start_time'] + task['duration']:.1f}с)")
+            
+            success = await self.create_styled_clip(
+                task['input_path'],
+                task['output_path'],
+                task['start_time'],
+                task['duration'],
+                task['subtitles'],
+                task['clip_number'],
+                task['config']
+            )
+            
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            if success and os.path.exists(task['output_path']):
+                logger.info(f"⏱️ Клип {task['clip_number']} создан за {processing_time:.1f} сек")
+                return task['output_path']
+            else:
+                logger.error(f"❌ Клип {task['clip_number']} не создан или файл не существует (время: {processing_time:.1f} сек)")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания клипа {task['clip_number']}: {e}")
+            return None
+
+    async def create_clips(self, video_path: str, clip_duration: int, subtitles: list, start_index: int = 0, config: dict = None) -> list:
+        """Создание клипов из видео со строгим таймлайном"""
+        try:
+            video_info = self.get_video_info(video_path)
+            total_duration = video_info['duration']
+            
+            clips = []
+            current_time = 0
+            clip_index = start_index
+            skipped_clips = 0
+            
+            while current_time < total_duration:
+                end_time = current_time + clip_duration
+                
+                # СТРОГИЙ ТАЙМЛАЙН: только клипы точной длительности
+                remaining_time = total_duration - current_time
+                
+                # Если оставшееся время меньше заданной длительности - пропускаем
+                if remaining_time < clip_duration:
+                    logger.info(f"Пропущен последний кусок: {remaining_time:.1f} сек < {clip_duration} сек (строгий таймлайн)")
+                    skipped_clips += 1
+                    break
+                
+                clip_path = self.output_dir / f"clip_{clip_index:03d}.mp4"
+                
+                # Создаем клип с точной длительностью
+                success = await self.create_styled_clip(
+                    video_path,
+                    str(clip_path),
+                    current_time,
+                    clip_duration,  # Всегда используем точную длительность
+                    subtitles,
+                    clip_index + 1,
+                    config
+                )
+                
+                if success:
+                    clips.append(str(clip_path))
+                    logger.info(f"Создан клип {clip_index + 1}: {current_time:.1f}-{current_time + clip_duration:.1f} сек ({clip_duration} сек)")
+                    clip_index += 1
+                else:
+                    logger.warning(f"Не удалось создать клип {clip_index + 1}")
+                
+                current_time += clip_duration
+            
+            # Детальная статистика
+            expected_clips = int(total_duration // clip_duration)
+            logger.info(f"📊 СТАТИСТИКА СОЗДАНИЯ КЛИПОВ:")
+            logger.info(f"   Длительность видео: {total_duration:.1f} сек")
+            logger.info(f"   Ожидалось клипов: {expected_clips}")
+            logger.info(f"   Создано клипов: {len(clips)}")
+            logger.info(f"   Пропущено клипов: {skipped_clips}")
+            logger.info(f"   Эффективность: {len(clips)/expected_clips*100:.1f}%")
+            
+            return clips
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания клипов: {e}")
+            return []
     
     async def create_styled_clip(self, input_path: str, output_path: str, start_time: float, 
                                duration: float, subtitles: list, clip_number: int, config: dict = None) -> bool:
@@ -92,9 +289,15 @@ class VideoEditor:
         # Проверяем доступность GPU
         gpu_available = self._check_gpu_support()
         
-        # Всегда используем CPU ввод для стабильности в Colab
-        main_video = ffmpeg.input(input_path, ss=start_time, t=duration)
-        logger.info(f"💻 Используем CPU для создания клипа {clip_number}")
+        if gpu_available:
+            # ПОЛНОЕ GPU ускорение: декодирование на GPU
+            main_video = ffmpeg.input(input_path, ss=start_time, t=duration, 
+                                    hwaccel='cuda', hwaccel_output_format='cuda')
+            logger.info(f"🚀 Клип {clip_number}: ПОЛНОЕ GPU ускорение (декодирование + обработка + кодирование)")
+        else:
+            # CPU ввод для fallback
+            main_video = ffmpeg.input(input_path, ss=start_time, t=duration)
+            logger.info(f"💻 Клип {clip_number}: используется CPU обработка")
         
         # Создаем размытый фон (растягиваем на весь экран) - ВЕРТИКАЛЬНЫЙ ФОРМАТ
         blurred_bg = (
@@ -268,27 +471,51 @@ class VideoEditor:
         # ПРИНУДИТЕЛЬНО добавляем финальное масштабирование до 9:16
         final_video_scaled = final_video.filter('scale', 1080, 1920, force_original_aspect_ratio='decrease').filter('pad', 1080, 1920, '(ow-iw)/2', '(oh-ih)/2')
         
-        # Финальный вывод с GPU/CPU кодировщиком
+        # Финальный вывод с МАКСИМАЛЬНЫМ GPU ускорением
         if gpu_available:
-            # GPU ускоренный вывод (NVIDIA NVENC) - ИСПРАВЛЕННАЯ ВЕРСИЯ
-            (
-                ffmpeg
-                .output(final_video_scaled, audio, output_path, 
-                       vcodec='h264_nvenc',    # GPU кодировщик NVIDIA
-                       acodec='aac',
-                       preset='fast',          # Быстрый пресет для стабильности
-                       cq=23,                  # Разумное качество (23 хорошо для GPU)
-                       pix_fmt='yuv420p',      # Совместимость
-                       **{'b:v': '8M',         # Разумный битрейт
-                          'b:a': '128k',       # Стандартный битрейт аудио
-                          'maxrate': '10M',    # Максимальный битрейт
-                          'bufsize': '16M',    # Размер буфера
-                          'profile:v': 'main', # Основной профиль (более совместимый)
-                          'level': '4.0'})     # Правильный уровень для Full HD
-                .overwrite_output()
-                .run()
-            )
-            logger.info(f"🎮 Клип {clip_number} создан с GPU ускорением МАКСИМАЛЬНОГО КАЧЕСТВА (1080x1920)")
+            # МАКСИМАЛЬНОЕ GPU ускорение (NVIDIA NVENC) - используем больше GPU памяти
+            try:
+                (
+                    ffmpeg
+                    .output(final_video_scaled, audio, output_path, 
+                           vcodec='h264_nvenc',    # GPU кодировщик NVIDIA
+                           acodec='aac',
+                           preset='p2',            # БЫСТРЫЙ NVENC пресет (p1=fastest, p2=faster)
+                           rc='vbr',               # Variable bitrate для NVENC
+                           cq=20,                  # Более высокое качество (меньше число = лучше качество)
+                           pix_fmt='yuv420p',      # Совместимость
+                           gpu=0,                  # Принудительно используем первый GPU
+                           **{'b:v': '10M',        # Увеличенный битрейт для лучшего качества
+                              'b:a': '128k',       # Стандартный битрейт аудио
+                              'maxrate': '15M',    # Увеличенный максимальный битрейт
+                              'bufsize': '20M',    # Увеличенный размер буфера (больше GPU памяти)
+                              'surfaces': '32',    # Больше поверхностей для GPU (использует больше VRAM)
+                              'delay': '0',        # Минимальная задержка
+                              'rc-lookahead': '32'}) # Увеличенный lookahead (больше GPU вычислений)
+                    .overwrite_output()
+                    .run(quiet=True)
+                )
+                logger.info(f"🚀 Клип {clip_number}: создан с МАКСИМАЛЬНЫМ GPU ускорением (10-12 ГБ VRAM)")
+            except Exception as nvenc_error:
+                logger.warning(f"⚠️ Клип {clip_number}: GPU не сработал, fallback на CPU: {nvenc_error}")
+                # Fallback на CPU
+                (
+                    ffmpeg
+                    .output(final_video_scaled, audio, output_path, 
+                           vcodec='libx264',
+                           acodec='aac',
+                           preset='fast',
+                           crf=23,
+                           pix_fmt='yuv420p',
+                           **{'b:a': '128k',
+                              'maxrate': '8M',
+                              'bufsize': '12M',
+                              'profile:v': 'main',
+                              'level': '4.0'})
+                    .overwrite_output()
+                    .run(quiet=True)
+                )
+                logger.info(f"💻 Клип {clip_number}: создан с CPU fallback")
         else:
             # CPU вывод с улучшенным качеством для больших видео
             if is_large_video:
