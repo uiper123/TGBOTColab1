@@ -290,9 +290,7 @@ class VideoEditor:
         if gpu_available:
             video_stream = video_stream.filter('hwupload_cuda')
             # РЕШЕНИЕ: Разделяем поток на два, чтобы избежать ошибки "multiple outgoing edges"
-            split_streams = video_stream.filter('split', 2)
-            video_stream_bg = split_streams[0]
-            video_stream_main = split_streams[1]
+            video_stream_bg, video_stream_main = video_stream.split()
         else:
             video_stream_bg = video_stream
             video_stream_main = video_stream
