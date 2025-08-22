@@ -279,15 +279,26 @@ class VideoEditor:
             return True
             
         except Exception as e:
+            import traceback
             logger.error(f"Ошибка создания стилизованного клипа: {e}")
+            logger.error(f"Полный traceback: {traceback.format_exc()}")
             return False
     
     def _create_styled_clip_sync(self, input_path: str, output_path: str, start_time: float,
                                duration: float, subtitles: list, clip_number: int, config: dict = None):
         """Синхронное создание стилизованного клипа с GPU ускорением """
         
-        # Проверяем доступность GPU
-        gpu_available = self._check_gpu_support()
+        try:
+            logger.info(f"🔧 Начинаем создание клипа {clip_number}: {input_path}")
+            
+            # Проверяем доступность GPU
+            gpu_available = self._check_gpu_support()
+            logger.info(f"🔧 GPU доступен: {gpu_available}")
+        except Exception as e:
+            logger.error(f"🔧 Ошибка в начале _create_styled_clip_sync: {e}")
+            import traceback
+            logger.error(f"🔧 Traceback: {traceback.format_exc()}")
+            raise
         
         if gpu_available:
             # ПОЛНОЕ GPU ускорение: декодирование на GPU

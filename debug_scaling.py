@@ -46,8 +46,11 @@ def analyze_video_detailed(video_path: str):
                 
                 # Вычисляем FPS
                 try:
-                    fps_num, fps_den = map(int, fps.split('/'))
-                    fps_value = fps_num / fps_den if fps_den != 0 else 0
+                    if '/' in fps:
+                        fps_num, fps_den = map(int, fps.split('/'))
+                        fps_value = fps_num / fps_den if fps_den != 0 else 0
+                    else:
+                        fps_value = float(fps)
                 except:
                     fps_value = 0
                 
