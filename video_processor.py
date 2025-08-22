@@ -717,7 +717,7 @@ class VideoProcessor:
                 subtitles,
                 start_index=start_index,
                 config=config,
-                max_parallel=5  # Уменьшаем нагрузку на GPU
+                max_parallel=10  # Увеличиваем нагрузку на GPU
             )
             logger.info(f"   🎉 Из {chunk_path} создано {len(clips)} клипов")
             return clips

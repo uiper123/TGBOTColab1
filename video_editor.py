@@ -76,7 +76,7 @@ class VideoEditor:
         if hasattr(self, '_cached_scaling_info'):
             delattr(self, '_cached_scaling_info')
 
-    async def create_clips_parallel(self, video_path: str, clip_duration: int, subtitles: list, start_index: int = 0, config: dict = None, max_parallel: int = None) -> list:
+    async def create_clips_parallel(self, video_path: str, clip_duration: int, subtitles: list, start_index: int = 0, config: dict = None, max_parallel: int = 4) -> list:
         """ПРОСТОЕ и НАДЕЖНОЕ создание клипов с ограниченной параллельностью"""
         try:
             # Очищаем кеш для нового файла
@@ -112,16 +112,6 @@ class VideoEditor:
                 
                 current_time += clip_duration
                 clip_index += 1
-            
-            # Автоматически определяем оптимальное количество параллельных процессов
-            if max_parallel is None:
-                gpu_available = self._check_gpu_support()
-                if gpu_available:
-                    max_parallel = min(8, len(clips_to_create))  # Максимум 8 для GPU (больше VRAM)
-                    logger.info(f"🚀 GPU режим: автоматически выбрано {max_parallel} параллельных процессов")
-                else:
-                    max_parallel = min(4, len(clips_to_create))  # Максимум 4 для CPU
-                    logger.info(f"💻 CPU режим: автоматически выбрано {max_parallel} параллельных процессов")
             
             logger.info(f"🚀 Планируется создать {len(clips_to_create)} клипов, макс. параллельно: {max_parallel}")
             
@@ -277,28 +267,40 @@ class VideoEditor:
     
     def _create_styled_clip_sync(self, input_path: str, output_path: str, start_time: float,
                                duration: float, subtitles: list, clip_number: int, config: dict = None):
-        """Синхронное создание стилизованного клипа с ПОЛНЫМ GPU ускорением"""
+        """Синхронное создание стилизованного клипа с GPU ускорением"""
         
         # Проверяем доступность GPU
         gpu_available = self._check_gpu_support()
         if gpu_available:
-            logger.info(f"🚀 Клип {clip_number}: ПОЛНОЕ GPU ускорение (декодирование + обработка + кодирование)")
-            # ПОЛНОЕ GPU ускорение: декодирование на GPU
-            main_video = ffmpeg.input(input_path, ss=start_time, t=duration, 
-                                    hwaccel='cuda', hwaccel_output_format='cuda')
+            logger.info(f"🎮 Клип {clip_number}: используется GPU ускорение")
         else:
             logger.info(f"💻 Клип {clip_number}: используется CPU обработка")
-            # CPU ввод для fallback
-            main_video = ffmpeg.input(input_path, ss=start_time, t=duration)
         
+        # Оптимизированный ввод с GPU-ускорением
+        input_options = {'ss': start_time, 't': duration}
+        if gpu_available:
+            # Используем аппаратный декодер NVIDIA
+            input_options['hwaccel'] = 'cuda'
+            input_options['c:v'] = 'h264_cuvid' # или hevc_cuvid для H.265
+
+        main_video = ffmpeg.input(input_path, **input_options)
+        
+        # Загружаем видео в память GPU
+        video_stream = main_video.video
+        if gpu_available:
+            video_stream = video_stream.filter('hwupload_cuda')
+            # РЕШЕНИЕ: Разделяем поток на два, чтобы избежать ошибки "multiple outgoing edges"
+            video_stream_bg, video_stream_main = video_stream.split(2)
+        else:
+            video_stream_bg = video_stream
+            video_stream_main = video_stream
+
         # Создаем размытый фон (растягиваем на весь экран) - ВЕРТИКАЛЬНЫЙ ФОРМАТ
-        # Используем CPU фильтры для стабильности, но с GPU декодированием
         blurred_bg = (
-            main_video
-            .video
-            .filter('scale', 1080, 1920, force_original_aspect_ratio='increase')  # Масштабирование
-            .filter('crop', 1080, 1920)  # Обрезаем до точного размера
-            .filter('gblur', sigma=20)  # Размытие
+            video_stream_bg
+            .filter('scale_npp', 1080, 1920) # Используем GPU-фильтр
+            .filter('crop', 1080, 1920)
+            .filter('gblur', sigma=20)
         )
         
         # Основное видео по центру - МАКСИМАЛЬНОЕ масштабирование с обрезкой
@@ -391,31 +393,25 @@ class VideoEditor:
         is_large_video = scaling_info['is_large_video']
         
         # Используем улучшенное масштабирование для больших видео
-        if is_large_video:
-            # Для больших видео используем высококачественный алгоритм масштабирования
-            main_scaled = (
-                main_video
-                .video
-                .filter('scale', target_width, target_height, 
-                       flags='lanczos')  # Высококачественный алгоритм
-            )
-        else:
-            # Для обычных видео используем стандартное масштабирование
-            main_scaled = (
-                main_video
-                .video
-                .filter('scale', target_width, target_height)
-            )
+        scaling_algorithm = 'lanczos' if is_large_video else 'bicubic'
+        main_scaled = (
+            video_stream_main # Используем уже загруженный в GPU поток
+            .filter('scale_npp', target_width, target_height, interp_algo=scaling_algorithm)
+        )
         
         # Если нужна обрезка по бокам - применяем crop фильтр
         if crop_needed:
             main_scaled = main_scaled.filter('crop', crop_width, crop_height, 
-                                           x='(iw-ow)/2', y='(ih-oh)/2')  # Обрезаем по центру
+                                           x='(iw-ow)/2', y='(ih-oh)/2')
         
-        # Накладываем основное видео на размытый фон
-        video_with_bg = ffmpeg.filter([blurred_bg, main_scaled], 'overlay', 
+        # Накладываем основное видео на размытый фон (тоже на GPU)
+        video_with_bg = ffmpeg.filter([blurred_bg, main_scaled], 'overlay_cuda', 
                                     x='(W-w)/2', y='(H-h)/2')
         
+        # Для добавления текста необходимо вернуть видео в системную память
+        if gpu_available:
+            video_with_bg = video_with_bg.filter('hwdownload').filter('format', 'yuv420p')
+
         # Получаем пользовательские заголовки из config
         if config:
             title_template = config.get('title', 'ФРАГМЕНТ')
@@ -481,33 +477,28 @@ class VideoEditor:
         # ПРИНУДИТЕЛЬНО добавляем финальное масштабирование до 9:16
         final_video_scaled = final_video.filter('scale', 1080, 1920, force_original_aspect_ratio='decrease').filter('pad', 1080, 1920, '(ow-iw)/2', '(oh-ih)/2')
         
-        # Финальный вывод с МАКСИМАЛЬНЫМ GPU ускорением
+        # Финальный вывод с GPU/CPU кодировщиком
         if gpu_available:
-            # МАКСИМАЛЬНОЕ GPU ускорение (NVIDIA NVENC) - используем больше GPU памяти
+            # GPU ускоренный вывод (NVIDIA NVENC) - ИСПРАВЛЕННАЯ ВЕРСИЯ
             try:
                 (
                     ffmpeg
                     .output(final_video_scaled, audio, output_path, 
                            vcodec='h264_nvenc',    # GPU кодировщик NVIDIA
                            acodec='aac',
-                           preset='p2',            # БЫСТРЫЙ NVENC пресет (p1=fastest, p2=faster)
+                           preset='p4',            # NVENC пресет (p1-p7, p4 = medium)
                            rc='vbr',               # Variable bitrate для NVENC
-                           cq=20,                  # Более высокое качество (меньше число = лучше качество)
+                           cq=23,                  # Качество для NVENC
                            pix_fmt='yuv420p',      # Совместимость
-                           gpu=0,                  # Принудительно используем первый GPU
-                           **{'b:v': '8M',         # Увеличенный битрейт для лучшего качества
+                           **{'b:v': '6M',         # Консервативный битрейт
                               'b:a': '128k',       # Стандартный битрейт аудио
-                              'maxrate': '12M',    # Увеличенный максимальный битрейт
-                              'bufsize': '16M',    # Увеличенный размер буфера (больше GPU памяти)
-                              'surfaces': '32',    # Больше поверхностей для GPU (использует больше VRAM)
-                              'delay': '0',        # Минимальная задержка
-                              'rc-lookahead': '32'}) # Увеличенный lookahead (больше GPU вычислений)
+                              'maxrate': '8M',     # Максимальный битрейт
+                              'bufsize': '12M'})   # Размер буфера
                     .overwrite_output()
                     .run(quiet=True)
                 )
-                logger.info(f"✅ Клип {clip_number}: создан с МАКСИМАЛЬНЫМ GPU ускорением")
+                pass  # Успешно создан с GPU
             except Exception as nvenc_error:
-                logger.warning(f"⚠️ Клип {clip_number}: GPU не сработал, fallback на CPU: {nvenc_error}")
                 # Fallback на CPU
                 (
                     ffmpeg
