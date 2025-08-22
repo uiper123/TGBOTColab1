@@ -32,6 +32,12 @@ class VideoEditor:
             
             # Правильно парсим FPS (может быть в формате "30/1" или "29.97")
             fps_str = video_stream['r_frame_rate']
+            logger.info(f"🔧 FPS строка: {fps_str}, тип: {type(fps_str)}")
+            
+            # Убеждаемся, что fps_str - это строка
+            if not isinstance(fps_str, str):
+                fps_str = str(fps_str)
+                
             if '/' in fps_str:
                 numerator, denominator = fps_str.split('/')
                 fps = float(numerator) / float(denominator)
