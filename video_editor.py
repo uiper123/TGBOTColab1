@@ -87,7 +87,7 @@ class VideoEditor:
     
     def _create_styled_clip_sync(self, input_path: str, output_path: str, start_time: float,
                                duration: float, subtitles: list, clip_number: int, config: dict = None):
-        """Синхронное создание стилизованного клипа с GPU ускорением"""
+        """Синхронное создание стилизованного клипа с GPU ускорением """
         
         # Проверяем доступность GPU
         gpu_available = self._check_gpu_support()
