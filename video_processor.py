@@ -331,12 +331,6 @@ class VideoProcessor:
         gpu_available = self._check_gpu_support()
         video_codec = self._get_video_codec(input_path)
         
-        # Для AV1 видео используем специальную обработку
-        if video_codec == 'av1':
-            logger.info(f"🎬 Обнаружен AV1 кодек, используем оптимизированную обработку")
-            logger.info(f"   📊 Параметры чанка: start={start_time}s, duration={duration}s")
-            return self._create_chunk_av1_optimized(input_path, output_path, start_time, duration)
-        
         if gpu_available:
             # GPU ускоренная команда (NVIDIA) - ИСПРАВЛЕННАЯ ВЕРСИЯ
             cmd = [
