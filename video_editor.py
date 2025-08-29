@@ -309,7 +309,7 @@ class VideoEditor:
         if gpu_available:
             # ПОЛНОЕ GPU ускорение: декодирование на GPU
             main_video = ffmpeg.input(input_path, ss=start_time, t=duration, 
-                                    hwaccel='cuda')
+                                    hwaccel='cuda', hwaccel_output_format='cuda')
             logger.info(f"🚀 Клип {clip_number}: ПОЛНОЕ GPU ускорение (декодирование + обработка + кодирование)")
         else:
             # CPU ввод для fallback

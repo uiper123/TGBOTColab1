@@ -194,12 +194,17 @@ class VideoProcessor:
                 })
                 chunk_paths.append(str(chunk_path))
             
-            logger.info(f"Начинаем последовательную нарезку {len(chunk_tasks)} чанков...")
+            logger.info(f"Начинаем нарезку {len(chunk_tasks)} чанков...")
+            max_concurrent = 3  # Обрабатываем по 3 чанка одновременно
+            logger.info(f"Используем {max_concurrent} параллельных процесса для нарезки чанков.")
 
             results = []
-            for task in chunk_tasks:
-                result = await self._create_chunk_ultra_fast(task)
-                results.append(result)
+            for i in range(0, len(chunk_tasks), max_concurrent):
+                batch = chunk_tasks[i:i + max_concurrent]
+                batch_tasks = [self._create_chunk_ultra_fast(task) for task in batch]
+                batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                results.extend(batch_results)
+                logger.info(f"Завершен батч {i//max_concurrent + 1}/{(len(chunk_tasks)-1)//max_concurrent + 1}")
             
 
             
@@ -662,11 +667,11 @@ class VideoProcessor:
             # МАКСИМАЛЬНЫЙ параллелизм ffmpeg для GPU
             gpu_available = self._check_gpu_support()
             if gpu_available:
-                max_concurrent_ffmpeg = 1  # Последовательная обработка клипов для стабильности
-                logger.info(f"🚀 GPU режим: используем {max_concurrent_ffmpeg} параллельный ffmpeg процесс")
+                max_concurrent_ffmpeg = 3  # Обрабатываем по 3 клипа одновременно
+                logger.info(f"🚀 GPU режим: используем {max_concurrent_ffmpeg} параллельных ffmpeg процесса")
             else:
-                max_concurrent_ffmpeg = 1  # Последовательная обработка клипов для стабильности
-                logger.info(f"💻 CPU режим: используем {max_concurrent_ffmpeg} параллельный ffmpeg процесс")
+                max_concurrent_ffmpeg = 3  # Обрабатываем по 3 клипа одновременно
+                logger.info(f"💻 CPU режим: используем {max_concurrent_ffmpeg} параллельных ffmpeg процесса")
             semaphore = asyncio.Semaphore(max_concurrent_ffmpeg)
 
             async def run_with_semaphore(task):
