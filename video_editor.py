@@ -481,9 +481,24 @@ class VideoEditor:
             start_time, 
             duration
         )
+
+        # Добавляем баннер
+        if config and config.get('banner', False):
+            banner_path = "banner1.mp4"
+            if os.path.exists(banner_path):
+                banner_video = ffmpeg.input(banner_path, stream_loop=-1).video.filter('chromakey', color='green', similarity=0.3).filter('scale', 1080, -1)
+                final_video = ffmpeg.filter([final_video, banner_video], 'overlay', x=0, y='H-h')
+
         
         # Аудио
         audio = main_video.audio
+
+        # Добавляем фоновую музыку
+        if config and config.get('music'):
+            music_path = config['music']
+            if os.path.exists(music_path):
+                music_audio = ffmpeg.input(music_path, stream_loop=-1).audio
+                audio = ffmpeg.filter([audio, music_audio], 'amix', inputs=2, duration='first', dropout_transition=3)
         
         # ПРИНУДИТЕЛЬНО добавляем финальное масштабирование до 9:16
         final_video_scaled = final_video.filter('scale', 1080, 1920, force_original_aspect_ratio='decrease').filter('pad', 1080, 1920, '(ow-iw)/2', '(oh-ih)/2')
@@ -604,7 +619,7 @@ class VideoEditor:
         result_video = video
         for i, sub in enumerate(segment_subtitles):
             # Упрощенная анимация для стабильности
-            y_pos = f"h-200-20*abs(sin(2*PI*(t-{sub['start']})*2))"
+            y_pos = f"h-350-20*abs(sin(2*PI*(t-{sub['start']})*2))"
             
             result_video = result_video.drawtext(
                 text=sub['text'],

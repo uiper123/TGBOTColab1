@@ -22,6 +22,7 @@ class TelegramBot:
         self.user_settings = {}  # Хранение настроек пользователей
         self.waiting_for_cookies = set()  # Пользователи, ожидающие ввода cookies
         self.waiting_for_token = set()  # Пользователи, ожидающие ввода токена
+        self.waiting_for_music = set() # Пользователи, ожидающие загрузки музыки
         
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /start"""
@@ -29,7 +30,9 @@ class TelegramBot:
         self.user_settings[user_id] = {
             'duration': 30,
             'title': 'ФРАГМЕНТ',
-            'subtitle': 'Часть'
+            'subtitle': 'Часть',
+            'banner': True,  # Баннер по умолчанию включен
+            'music': None  # Фоновая музыка по умолчанию отключена
         }  # Настройки по умолчанию
         
         await update.message.reply_text(
@@ -38,8 +41,13 @@ class TelegramBot:
             "/start - Начать работу\n"
             "/duration <секунды> - Установить длительность шотсов (по умолчанию 30 сек)\n"
             "/title <текст> - Установить заголовок (по умолчанию 'ФРАГМЕНТ')\n"
-            "/subtitle <текст> - Установить подзаголовок (по умолчанию 'Часть')\n"
-            "/cookies - Обновить cookies для YouTube\n"
+            /subtitle <текст> - Установить подзаголовок (по умолчанию 'Часть')
+/toggle_banner - Включить/отключить баннер (по умолчанию вкл)
+/music - Установить фоновую музыку
+/cookies - Обновить cookies для YouTube
+            /toggle_banner - Включить/отключить баннер
+            /music - Установить фоновую музыку
+            /cookies - Обновить cookies для YouTube
             "/token - Обновить Google OAuth токен\n"
             "/settings - Показать текущие настройки\n"
             "/help - Помощь\n\n"
@@ -140,11 +148,37 @@ class TelegramBot:
             f"⚙️ Текущие настройки:\n\n"
             f"⏱ Длительность: {settings.get('duration', 30)} секунд\n"
             f"📝 Заголовок: '{settings.get('title', 'ФРАГМЕНТ')}'\n"
-            f"📝 Подзаголовок: '{settings.get('subtitle', 'Часть')}'\n\n"
+            f"📝 Подзаголовок: '{settings.get('subtitle', 'Часть')}'\n"
+            f"🖼️ Баннер: {'включен' if settings.get('banner', True) else 'отключен'}"
+            f"🎵 Музыка: {settings.get('music', 'не установлена')}"
             f"Для изменения используйте команды:\n"
             f"/duration <секунды>\n"
             f"/title <текст>\n"
             f"/subtitle <текст>"
+        )
+    
+    async def toggle_banner(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /toggle_banner для включения/отключения баннера"""
+        user_id = update.effective_user.id
+        if user_id not in self.user_settings:
+            self.user_settings[user_id] = {}
+        
+        # Переключаем значение баннера
+        self.user_settings[user_id]['banner'] = not self.user_settings[user_id].get('banner', True)
+        
+        status = "включен" if self.user_settings[user_id]['banner'] else "отключен"
+        await update.message.reply_text(f"✅ Баннер {status}")
+
+    async def set_music(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /music для установки фоновой музыки"""
+        user_id = update.effective_user.id
+        
+        # Добавляем пользователя в список ожидающих музыку
+        self.waiting_for_music.add(user_id)
+        
+        await update.message.reply_text(
+            "🎵 Отправьте аудиофайл для фоновой музыки (MP3, WAV, AAC).\n\n"
+            "Отправьте /cancel для отмены."
         )
     
     async def set_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -224,12 +258,23 @@ class TelegramBot:
         if user_id in self.waiting_for_token:
             await self.process_token_input(update, message.text)
             return
+
+        # Проверяем, ожидает ли пользователь загрузки музыки
+        if user_id in self.waiting_for_music:
+            if message.text == '/cancel':
+                self.waiting_for_music.discard(user_id)
+                await update.message.reply_text("Отменено.")
+            else:
+                await self.process_music_input(update, context)
+            return
         
         # Получаем настройки пользователя
         user_config = self.user_settings.get(user_id, {
             'duration': 30,
             'title': 'ФРАГМЕНТ',
-            'subtitle': 'Часть'
+            'subtitle': 'Часть',
+            'banner': True,
+            'music': None
         })
         
         if message.text and ('youtube.com' in message.text or 'youtu.be' in message.text):
@@ -337,6 +382,38 @@ class TelegramBot:
                 "❌ Ошибка сохранения токена. Попробуйте еще раз командой /token"
             )
     
+    async def process_music_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка загруженного аудиофайла"""
+        user_id = update.effective_user.id
+        message = update.message
+
+        if message.audio:
+            try:
+                audio_file = await message.audio.get_file()
+                file_path = f"temp_music_{user_id}.{audio_file.file_path.split('.')[-1]}"
+                await audio_file.download_to_drive(file_path)
+
+                if user_id not in self.user_settings:
+                    self.user_settings[user_id] = {}
+                self.user_settings[user_id]['music'] = file_path
+
+                self.waiting_for_music.discard(user_id)
+
+                await update.message.reply_text(
+                    f"✅ Музыка успешно загружена и установлена!\n"
+                    f"Файл сохранен как: {file_path}"
+                )
+                logger.info(f"Музыка загружена пользователем {user_id}: {file_path}")
+
+            except Exception as e:
+                logger.error(f"Ошибка загрузки музыки: {e}")
+                self.waiting_for_music.discard(user_id)
+                await update.message.reply_text(
+                    "❌ Ошибка загрузки музыки. Попробуйте еще раз командой /music"
+                )
+        else:
+            await update.message.reply_text("⚠️ Пожалуйста, отправьте аудиофайл.")
+    
     async def process_youtube_url(self, update: Update, url: str, config: dict):
         """Обработка YouTube ссылки"""
         await update.message.reply_text("🔄 Начинаю обработку YouTube видео...")
@@ -409,6 +486,8 @@ class TelegramBot:
         application.add_handler(CommandHandler("duration", self.set_duration))
         application.add_handler(CommandHandler("title", self.set_title))
         application.add_handler(CommandHandler("subtitle", self.set_subtitle))
+        application.add_handler(CommandHandler("toggle_banner", self.toggle_banner))
+        application.add_handler(CommandHandler("music", self.set_music))
         application.add_handler(CommandHandler("cookies", self.set_cookies))
         application.add_handler(CommandHandler("token", self.set_token))
         application.add_handler(CommandHandler("settings", self.show_settings))

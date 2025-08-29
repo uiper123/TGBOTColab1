@@ -675,7 +675,7 @@ class VideoProcessor:
                     start_time=current_time,
                     duration=duration,
                     subtitles=subtitles,
-                    config=config,
+                    config=config,  # Передаем полный конфиг
                     clip_number=clip_index + 1
                 ))
                 current_time += duration
