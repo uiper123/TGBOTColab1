@@ -194,35 +194,12 @@ class VideoProcessor:
                 })
                 chunk_paths.append(str(chunk_path))
             
-            logger.info(f"Начинаем СУПЕР БЫСТРУЮ параллельную нарезку {len(chunk_tasks)} чанков...")
-            
-            # ПАРАЛЛЕЛЬНО создаем все чанки с прямыми командами ffmpeg
-            # МАКСИМАЛЬНЫЙ параллелизм для GPU (больше VRAM = больше параллелизма)
-            gpu_available = self._check_gpu_support()
-            if gpu_available:
-                max_concurrent = min(10, len(chunk_tasks))  # Максимум 10 параллельных процессов для GPU
-                logger.info(f"🚀 GPU режим: используем {max_concurrent} параллельных процессов для МАКСИМАЛЬНОГО использования VRAM")
-            else:
-                max_concurrent = min(3, len(chunk_tasks))  # Максимум 3 параллельных процесса для CPU
-                logger.info(f"💻 CPU режим: используем {max_concurrent} параллельных процессов")
-            
-            if len(chunk_tasks) <= max_concurrent:
-                # Если чанков мало, создаем все параллельно
-                tasks = [
-                    self._create_chunk_ultra_fast(task) 
-                    for task in chunk_tasks
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-            else:
-                # Если чанков много, создаем батчами
-                logger.info(f"Создаем {len(chunk_tasks)} чанков батчами по {max_concurrent}")
-                results = []
-                for i in range(0, len(chunk_tasks), max_concurrent):
-                    batch = chunk_tasks[i:i + max_concurrent]
-                    batch_tasks = [self._create_chunk_ultra_fast(task) for task in batch]
-                    batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-                    results.extend(batch_results)
-                    logger.info(f"Завершен батч {i//max_concurrent + 1}/{(len(chunk_tasks)-1)//max_concurrent + 1}")
+            logger.info(f"Начинаем последовательную нарезку {len(chunk_tasks)} чанков...")
+
+            results = []
+            for task in chunk_tasks:
+                result = await self._create_chunk_ultra_fast(task)
+                results.append(result)
             
 
             
@@ -284,7 +261,7 @@ class VideoProcessor:
                     task['start_time'],
                     task['duration']
                 ),
-                timeout=30.0  # 30 секунд таймаут для первой попытки
+                timeout=120.0  # 120 секунд таймаут (увеличено для AV1)
             )
             
             # Проверяем, что файл действительно создался
@@ -604,7 +581,7 @@ class VideoProcessor:
             '-i', input_path,             # Входной файл
             '-t', str(duration),          # Длительность
             '-c:v', 'libx264',            # CPU кодировщик x264
-            '-c:a', 'copy',               # Копируем аудио без перекодирования
+            '-c:a', 'aac',               # Перекодируем аудио в AAC
             '-preset', 'fast',            # Быстрый пресет для нарезки
             '-crf', '23',                 # Разумное качество для нарезки
             '-profile:v', 'main',         # Основной профиль (более совместимый)
