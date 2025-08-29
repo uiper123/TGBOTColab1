@@ -662,11 +662,11 @@ class VideoProcessor:
             # МАКСИМАЛЬНЫЙ параллелизм ffmpeg для GPU
             gpu_available = self._check_gpu_support()
             if gpu_available:
-                max_concurrent_ffmpeg = 8  # Максимум 8 для GPU (больше VRAM)
-                logger.info(f"🚀 GPU режим: используем {max_concurrent_ffmpeg} параллельных ffmpeg процессов")
+                max_concurrent_ffmpeg = 1  # Последовательная обработка клипов для стабильности
+                logger.info(f"🚀 GPU режим: используем {max_concurrent_ffmpeg} параллельный ffmpeg процесс")
             else:
-                max_concurrent_ffmpeg = 3  # Максимум 3 для CPU
-                logger.info(f"💻 CPU режим: используем {max_concurrent_ffmpeg} параллельных ffmpeg процессов")
+                max_concurrent_ffmpeg = 1  # Последовательная обработка клипов для стабильности
+                logger.info(f"💻 CPU режим: используем {max_concurrent_ffmpeg} параллельный ffmpeg процесс")
             semaphore = asyncio.Semaphore(max_concurrent_ffmpeg)
 
             async def run_with_semaphore(task):
